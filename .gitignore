@@ -114,3 +114,10 @@ fairseq/temporal_convolution_tbc
 
 # data
 data-bin/
+
+# saved models
+saved_models/
+
+# cluster logs
+watch_folder/
+
