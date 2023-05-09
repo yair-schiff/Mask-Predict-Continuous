@@ -15,7 +15,7 @@ import numpy as np
 from . import (
     FairseqDecoder, FairseqEncoder, FairseqLanguageModel,
     register_model, register_model_architecture,
-    FairseqIncrementalDecoder, FairseqModel
+    FairseqIncrementalDecoder, FairseqEncoderDecoderModel
 )
 
 from fairseq import options
@@ -54,8 +54,9 @@ class BertLayerNorm(nn.Module):
         x = (x - u) / torch.sqrt(s + self.variance_epsilon)
         return self.gamma * x + self.beta
 
+
 @register_model('bert_transformer_seq2seq')
-class Transformer_nonautoregressive(FairseqModel):
+class Transformer_nonautoregressive(FairseqEncoderDecoderModel):
     def __init__(self, encoder, decoder):
         super().__init__(encoder, decoder)
         self.apply(self.init_bert_weights)
@@ -222,6 +223,73 @@ class Transformer_nonautoregressive(FairseqModel):
         return Transformer_nonautoregressive(encoder, decoder)
 
 
+@register_model('bert_transformer_seq2seq_continuous')
+class Transformer_nonautoregressive_continuous(Transformer_nonautoregressive):
+    def __init__(self, encoder, decoder):
+        super().__init__(encoder, decoder)
+        self.apply(self.init_bert_weights)
+
+    @staticmethod
+    def add_args(parser):
+        """Add model-specific arguments to the parser."""
+        super(Transformer_nonautoregressive_continuous, Transformer_nonautoregressive_continuous).add_args(parser)
+        parser.add_argument('--masking-strategy', type=str,
+                            choices=['mask_token', 'uniform', 'interpolate_to_uniform'],
+                            help='masking strategy')
+
+    @classmethod
+    def build_model(cls, args, task):
+        """Build a new model instance."""
+
+        # for ds in task.datasets.values():
+        #    ds.target_is_source = True
+
+        # make sure all arguments are present in older models
+        base_architecture(args)
+        if not hasattr(args, 'max_source_positions'):
+            args.max_source_positions = 1024
+        if not hasattr(args, 'max_target_positions'):
+            args.max_target_positions = 1024
+
+        src_dict, tgt_dict = task.source_dictionary, task.target_dictionary
+
+        def build_embedding(dictionary, embed_dim, path=None):
+
+            num_embeddings = len(dictionary)
+            padding_idx = dictionary.pad()
+            emb = nn.Embedding(num_embeddings, embed_dim, padding_idx)
+            # if provided, load from preloaded dictionaries
+            if path:
+                embed_dict = utils.parse_embedding(path)
+                utils.load_embedding(embed_dict, dictionary, emb)
+            return emb
+
+        if args.share_all_embeddings:
+            if src_dict != tgt_dict:
+                raise RuntimeError('--share-all-embeddings requires a joined dictionary')
+            if args.encoder_embed_dim != args.decoder_embed_dim:
+                raise RuntimeError(
+                    '--share-all-embeddings requires --encoder-embed-dim to match --decoder-embed-dim')
+            if args.decoder_embed_path and (
+                    args.decoder_embed_path != args.encoder_embed_path):
+                raise RuntimeError('--share-all-embeddings not compatible with --decoder-embed-path')
+            encoder_embed_tokens = build_embedding(
+                src_dict, args.encoder_embed_dim, path=args.encoder_embed_path
+            )
+            decoder_embed_tokens = encoder_embed_tokens
+            args.share_decoder_input_output_embed = True
+        else:
+            encoder_embed_tokens = build_embedding(
+                src_dict, args.encoder_embed_dim, path=args.encoder_embed_path
+            )
+            decoder_embed_tokens = build_embedding(
+                tgt_dict, args.decoder_embed_dim, path=args.decoder_embed_path
+            )
+
+        encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens, args.encoder_embed_scale)
+        decoder = SelfTransformerDecoderContinuous(args, tgt_dict, decoder_embed_tokens, args.decoder_embed_scale)
+        return Transformer_nonautoregressive_continuous(encoder, decoder)
+
 
 class SelfTransformerDecoder(FairseqIncrementalDecoder):
     """
@@ -293,7 +361,7 @@ class SelfTransformerDecoder(FairseqIncrementalDecoder):
         if self.normalize:
             self.layer_norm = BertLayerNorm(self.embed_dim)
 
-    def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
+    def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None, **kwargs):
         """
         Args:
             prev_output_tokens (LongTensor): previous decoder outputs of shape
@@ -374,6 +442,113 @@ class SelfTransformerDecoder(FairseqIncrementalDecoder):
 
     def upgrade_state_dict_named(self, state_dict, name):
         pass
+
+
+class SelfTransformerDecoderContinuous(SelfTransformerDecoder):
+    """
+    Transformer decoder consisting of *args.decoder_layers* layers. Each layer
+    is a :class:`TransformerDecoderLayer`.
+    Args:
+        args (argparse.Namespace): parsed command-line arguments
+        dictionary (~fairseq.data.Dictionary): decoding dictionary
+        embed_tokens (torch.nn.Embedding): output embedding
+        no_encoder_attn (bool, optional): whether to attend to encoder outputs.
+            Default: ``False``
+        left_pad (bool, optional): whether the input is left-padded. Default:
+            ``False``
+    """
+
+    def __init__(self, args, dictionary, embed_tokens, embed_scale=None, no_encoder_attn=False, left_pad=False,
+                 final_norm=True):
+        super().__init__(args, dictionary, embed_tokens, embed_scale, no_encoder_attn, left_pad, final_norm)
+        self.masking_idx = dictionary.mask_index
+        self.masking_strategy = args.masking_strategy
+
+    def forward(self, prev_output_tokens, prev_output_embeds=None, encoder_out=None, **kwargs):
+        """
+        Args:
+            prev_output_tokens (LongTensor): previous decoder outputs of shape
+                `(batch, tgt_len)`, for input feeding/teacher forcing
+            prev_output_embeds (FloatTensor): previous decoder logits of shape
+                `(batch, tgt_len, vocab)`, for input feeding/teacher forcing
+            encoder_out (Tensor, optional): output from the encoder, used for
+                encoder-side attention
+        Returns:
+            tuple:
+                - the last decoder layer's output of shape `(batch, tgt_len,
+                  vocab)`
+                - the last decoder layer's attention weights of shape `(batch,
+                  tgt_len, src_len)`
+        """
+        decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
+        decoder_masking_mask = prev_output_tokens.eq(self.masking_idx)
+
+        # embed positions
+        positions = self.embed_positions(
+            prev_output_tokens,
+        ) if self.embed_positions is not None else None
+
+        # embed tokens and positions
+        if prev_output_embeds is None:
+            x = self.embed_tokens(prev_output_tokens)
+            if self.masking_strategy == "mask_token":
+                x = x
+            elif self.masking_strategy == "uniform" or self.masking_strategy == "interpolate_to_uniform":
+                bsz, seq_len = x.shape[:2]
+                vocab_sz = self.embed_tokens.weight.shape[0]
+                unif = (1 / vocab_sz) * torch.ones((bsz, seq_len, vocab_sz))
+                with torch.no_grad():
+                    unif_embed = torch.matmul(unif.to(x.device), self.embed_tokens.weight)
+                if self.masking_strategy == "uniform":
+                    x[decoder_masking_mask] = unif_embed[decoder_masking_mask]
+                else:
+                    with torch.no_grad():
+                        target = kwargs["target"]
+                        target[~decoder_masking_mask] = prev_output_tokens[~decoder_masking_mask]
+                        target_embed = self.embed_tokens(target)
+                    t = (decoder_masking_mask.sum(dim=-1) / decoder_masking_mask.shape[-1]).unsqueeze(1).unsqueeze(2)
+                    intp_to_unif_embed = target_embed * t + unif_embed * (1 - t)
+                    x[decoder_masking_mask] = intp_to_unif_embed[decoder_masking_mask]
+            else:
+                raise NotImplementedError(f"Masking strategy {self.masking_strategy} not implemented.")
+            if self.project_in_dim is not None:
+                x = self.project_in_dim(x)
+        else:
+            x = torch.matmul(prev_output_embeds, self.embed_tokens.weight)
+
+        if positions is not None:
+            x += positions
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        # B x T x C -> T x B x C
+        x = x.transpose(0, 1)
+        attn = None
+        inner_states = [x]
+
+        # decoder layers
+        for layer in self.layers:
+            x, attn = layer(
+                x,
+                encoder_out['encoder_out'] if encoder_out is not None else None,
+                encoder_out['encoder_padding_mask'] if encoder_out is not None else None,
+                decoder_padding_mask,
+            )
+            inner_states.append(x)
+        if self.normalize:
+            x = self.layer_norm(x)
+        # T x B x C -> B x T x C
+        x = x.transpose(0, 1)
+
+        if self.project_out_dim is not None:
+            x = self.project_out_dim(x)
+
+        if self.adaptive_softmax is None and self.load_softmax:
+            # project back to size of vocabulary
+            if self.share_input_output_embed:
+                x = F.linear(x, self.embed_tokens.weight)
+            else:
+                x = F.linear(x, self.embed_out)
+
+        return x, {'attn': attn, 'inner_states': inner_states, 'predicted_lengths': encoder_out['predicted_lengths']}
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -519,7 +694,7 @@ class TransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = BertLayerNorm(embed_dim)
 
-    def forward(self, src_tokens, src_lengths):
+    def forward(self, src_tokens, src_lengths=None, **kwargs):
         """
         Args:
             src_tokens (LongTensor): tokens in the source language of shape
@@ -703,10 +878,14 @@ def base_architecture(args):
     args.bilm_add_bos = getattr(args, 'bilm_add_bos', False)
 
 
-
 @register_model_architecture('bert_transformer_seq2seq', 'bert_transformer_seq2seq_big')
 def bi_transformer_lm_big(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
     base_architecture(args)
+
+
+@register_model_architecture('bert_transformer_seq2seq_continuous', 'bert_transformer_seq2seq_continuous')
+def bert_continuous(args):
+    args.masking_strategy = getattr(args, 'masking_strategy', 'uniform')

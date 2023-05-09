@@ -32,7 +32,7 @@ class LabelSmoothedLengthCrossEntropyCriterion(FairseqCriterion):
         2) the sample size, which is used as the denominator for the gradient
         3) logging outputs to display while training
         """
-        net_output = model(**sample['net_input'])
+        net_output = model(**sample['net_input'], target=sample['target'])
         loss, nll_loss, length_loss, ntokens = self.compute_loss(model, net_output, sample, reduce=reduce)
         sample_size = ntokens #TODO why not merge ntokens and sample_size? what is the difference?
         logging_output = {
