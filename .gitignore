@@ -114,6 +114,7 @@ fairseq/temporal_convolution_tbc
 
 # data
 data-bin/
+data/
 
 # saved models
 saved_models/
