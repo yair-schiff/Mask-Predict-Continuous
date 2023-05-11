@@ -71,6 +71,10 @@ class FairseqBMUF(FairseqOptimizer):
     def optimizer_config(self):
         return self._optimizer.optimizer_config
 
+    @property
+    def scaler(self):
+        return self._optimizer.scaler
+
     def get_lr(self):
         return self._optimizer.get_lr()
 

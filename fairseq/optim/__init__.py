@@ -18,6 +18,7 @@ __all__ = [
     'FairseqOptimizer',
     'FP16Optimizer',
     'MemoryEfficientFP16Optimizer',
+    'FairseqBMUF'
 ]
 
 
