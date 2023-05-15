@@ -28,6 +28,7 @@ def infer_init_method(args):
         return
 
     # support torch.distributed.launch
+    args.distributed_group_rank = int(os.environ.get('SLURM_PROCID')) if os.environ.get('SLURM_PROCID') is not None else 0
     if all(key in os.environ for key in [
         'MASTER_ADDR', 'MASTER_PORT', 'WORLD_SIZE', 'RANK'
     ]):
