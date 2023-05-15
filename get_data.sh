@@ -47,5 +47,6 @@ cp wmt16_en_de/newstest2014.tok.bpe.32000.de test.de
 rm -r wmt16_en_de
 cd ../..
 python preprocess.py --source-lang en --target-lang de --trainpref data/wmt14.en-de/train --validpref data/wmt14.en-de/valid --testpref data/wmt14.en-de/test --destdir data-bin/wmt14.en-de --joined-dictionary --workers 8 --nwordssrc 32768 --nwordstgt 32768
+#python preprocess.py --source-lang en --target-lang de --trainpref data-bin/wmt14_ende_distill/train.en-de --validpref data-bin/wmt14_ende_distill/valid.en-de --workers 1 --testpref data-bin/wmt14_ende_distill/test.en-de --destdir data-bin/wmt14_ende_distill/ --joined-dictionary --workers 8 --nwordssrc 32768 --nwordstgt 32768
 python preprocess.py --source-lang de --target-lang en --trainpref data/wmt14.en-de/train --validpref data/wmt14.en-de/valid --testpref data/wmt14.en-de/test --destdir data-bin/wmt14.de-en --joined-dictionary --workers 8 --nwordssrc 32768 --nwordstgt 32768
-
+#python preprocess.py --source-lang de --target-lang en --trainpref data-bin/wmt14_ende_distill/train.de-en --validpref data-bin/wmt14_ende_distill/valid.de-en --workers 1 --testpref data-bin/wmt14_ende_distill/test.de-en --destdir data-bin/wmt14_ende_distill/ --joined-dictionary --workers 8 --nwordssrc 32768 --nwordstgt 32768
