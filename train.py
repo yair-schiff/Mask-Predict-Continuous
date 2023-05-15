@@ -15,6 +15,7 @@ import os
 import random
 
 import torch
+from torch.distributed import get_global_rank
 
 from fairseq import checkpoint_utils, distributed_utils, options, progress_bar, tasks, utils
 from fairseq.data import iterators
@@ -35,8 +36,11 @@ def main(args, init_distributed=False):
     if init_distributed:
         args.distributed_rank = distributed_utils.distributed_init(args)
 
+    rank_zero = (not init_distributed) or args.distributed_group_rank == 0
+
     # Print args
-    print(args)
+    if rank_zero:
+        print(args)
 
     # Setup task, e.g., translation, language modeling, etc.
     task = tasks.setup_task(args)
@@ -50,7 +54,7 @@ def main(args, init_distributed=False):
     criterion = task.build_criterion(args)
     print(model)
     print('| model {}, criterion {}'.format(args.arch, criterion.__class__.__name__))
-    print('| num. model params: {} (num. trained: {})'.format(
+    print('| num. model params: {:,d} (num. trained: {:,d})'.format(
         sum(p.numel() for p in model.parameters()),
         sum(p.numel() for p in model.parameters() if p.requires_grad),
     ))
@@ -75,12 +79,19 @@ def main(args, init_distributed=False):
     train_meter.start()
     valid_losses = [None]
     valid_subsets = args.valid_subset.split(',')
+
+    # Moving progress bar init to here
+    progress = progress_bar.build_progress_bar(  # initializing with dummy iterable
+        args=args, iterator=list[0], epoch=0, no_progress_bar='simple',
+    )
+    if hasattr(progress, 'save_args') and rank_zero:
+        progress.save_args(tag='train')
     while lr > args.min_lr and epoch_itr.epoch < max_epoch and trainer.get_num_updates() < max_update:
         # train for one epoch
-        train(args, trainer, task, epoch_itr)
+        train(args, trainer, task, epoch_itr, progress, rank_zero)
 
         if not args.disable_validation and epoch_itr.epoch % args.validate_interval == 0:
-            valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)
+            valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets, progress, rank_zero)
         else:
             valid_losses = [None]
 
@@ -98,7 +109,7 @@ def main(args, init_distributed=False):
     print('| done training in {:.1f} seconds'.format(train_meter.sum))
 
 
-def train(args, trainer, task, epoch_itr):
+def train(args, trainer, task, epoch_itr, progress, rank_zero):
     """Train the model for one epoch."""
     # Update parameters every N batches
     update_freq = args.update_freq[epoch_itr.epoch - 1] \
@@ -110,8 +121,11 @@ def train(args, trainer, task, epoch_itr):
         shuffle=(epoch_itr.epoch >= args.curriculum),
     )
     itr = iterators.GroupedIterator(itr, update_freq)
-    progress = progress_bar.build_progress_bar(
-        args, itr, epoch_itr.epoch, no_progress_bar='simple',
+
+    # Reinit progress bar
+    progress.reinit(
+        iterable=itr,
+        epoch=epoch_itr.epoch
     )
 
     extra_meters = collections.defaultdict(lambda: AverageMeter())
@@ -132,7 +146,8 @@ def train(args, trainer, task, epoch_itr):
             else:
                 extra_meters[k].update(v)
             stats[k] = extra_meters[k].avg
-        progress.log(stats, tag='train', step=stats['num_updates'])
+        if rank_zero:
+            progress.log(stats, tag='train', step=stats['num_updates'])
 
         # ignore the first mini-batch in words-per-second calculation
         if i == 0:
@@ -145,7 +160,7 @@ def train(args, trainer, task, epoch_itr):
             and num_updates % args.save_interval_updates == 0
             and num_updates > 0
         ):
-            valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets)
+            valid_losses = validate(args, trainer, task, epoch_itr, valid_subsets, progress, rank_zero)
             checkpoint_utils.save_checkpoint(args, trainer, epoch_itr, valid_losses[0])
 
         if num_updates >= max_update:
@@ -155,7 +170,8 @@ def train(args, trainer, task, epoch_itr):
     stats = get_training_stats(trainer)
     for k, meter in extra_meters.items():
         stats[k] = meter.avg
-    progress.print(stats, tag='train', step=stats['num_updates'])
+    if rank_zero:
+        progress.print(stats, tag='train', step=stats['num_updates'])
 
     # reset training meters
     for k in [
@@ -191,7 +207,7 @@ def get_training_stats(trainer):
     return stats
 
 
-def validate(args, trainer, task, epoch_itr, subsets):
+def validate(args, trainer, task, epoch_itr, subsets, progress, rank_zero):
     """Evaluate the model on the validation set(s) and return the losses."""
     valid_losses = []
     for subset in subsets:
@@ -211,10 +227,10 @@ def validate(args, trainer, task, epoch_itr, subsets):
             shard_id=args.distributed_rank,
             num_workers=args.num_workers,
         ).next_epoch_itr(shuffle=False)
-        progress = progress_bar.build_progress_bar(
-            args, itr, epoch_itr.epoch,
+        progress.reinit(
+            iterable=itr,
+            epoch=epoch_itr.epoch,
             prefix='valid on \'{}\' subset'.format(subset),
-            no_progress_bar='simple'
         )
 
         # reset validation loss meters
@@ -236,7 +252,8 @@ def validate(args, trainer, task, epoch_itr, subsets):
         stats = get_valid_stats(trainer)
         for k, meter in extra_meters.items():
             stats[k] = meter.avg
-        progress.print(stats, tag=subset, step=trainer.get_num_updates())
+        if rank_zero:
+            progress.print(stats, tag=subset, step=trainer.get_num_updates())
 
         valid_losses.append(stats[args.best_checkpoint_metric].avg)
     return valid_losses

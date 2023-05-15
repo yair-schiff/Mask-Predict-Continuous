@@ -9,19 +9,28 @@
 Wrapper around various loggers and progress bars (e.g., tqdm).
 """
 
-from collections import OrderedDict
 import json
-from numbers import Number
 import os
-import re
 import sys
+from collections import OrderedDict
+from numbers import Number
 
+import yaml
+from torch import Tensor
 from tqdm import tqdm
+
+try:
+    from tensorboardX import SummaryWriter
+    from tensorboardX.summary import hparams
+except ImportError:
+    print("tensorboard or required dependencies not found, "
+          "please see README for using tensorboard. (e.g. pip install tensorboardX)")
 
 from fairseq import distributed_utils
 from fairseq.meters import AverageMeter, StopwatchMeter, TimeMeter
 
 g_tbmf_wrapper = None
+
 
 def build_progress_bar(args, iterator, epoch=None, prefix=None, default='tqdm', no_progress_bar='none'):
     if args.log_format is None:
@@ -114,6 +123,16 @@ class progress_bar(object):
         for key in postfix.keys():
             postfix[key] = str(format_stat(postfix[key]))
         return postfix
+
+    def reinit(self, iterable, epoch=None, prefix=None):
+        self.iterable = iterable
+        self.offset = getattr(iterable, 'offset', 0)
+        self.epoch = epoch
+        self.prefix = ''
+        if epoch is not None:
+            self.prefix += '| epoch {:03d}'.format(epoch)
+        if prefix is not None:
+            self.prefix += ' | {}'.format(prefix)
 
 
 class json_progress_bar(progress_bar):
@@ -224,9 +243,26 @@ class tqdm_progress_bar(progress_bar):
         postfix = self._str_pipes(self._format_stats(stats))
         self.tqdm.write('{} | {}'.format(self.tqdm.desc, postfix))
 
+    def reinit(self, iterable, epoch=None, prefix=None):
+        super(tqdm_progress_bar, self).reinit(iterable, epoch, prefix)
+        self.tqdm = tqdm(iterable, self.prefix, leave=False)
+
+
+class CustomSummaryWriter(SummaryWriter):
+    def add_hparams(self, hparam_dict, metric_dict, name=None, global_step=None):
+        if type(hparam_dict) is not dict or type(metric_dict) is not dict:
+            raise TypeError('hparam_dict and metric_dict should be dictionary.')
+        exp, ssi, sei = hparams(hparam_dict, metric_dict)
+
+        self.file_writer.add_summary(exp)
+        self.file_writer.add_summary(ssi)
+        self.file_writer.add_summary(sei)
+        # self._get_comet_logger().log_parameters(hparam_dict, step=global_step)
+
 
 class tensorboard_log_wrapper(progress_bar):
     """Log to tensorboard."""
+    HPARAM_ARGS = ['masking_strategy', 'smooth_targets', 'warmup_updates']
 
     def __init__(self, wrapped_bar, tensorboard_logdir, args):
         self.wrapped_bar = wrapped_bar
@@ -234,10 +270,9 @@ class tensorboard_log_wrapper(progress_bar):
         self.args = args
 
         try:
-            from tensorboardX import SummaryWriter
-            self.SummaryWriter = SummaryWriter
+            self.SummaryWriter = CustomSummaryWriter
             self._writers = {}
-        except ImportError:
+        except ModuleNotFoundError:
             print("tensorboard or required dependencies not found, "
                   "please see README for using tensorboard. (e.g. pip install tensorboardX)")
             self.SummaryWriter = None
@@ -266,6 +301,22 @@ class tensorboard_log_wrapper(progress_bar):
         self._log_to_tensorboard(stats, tag, step)
         self.wrapped_bar.print(stats, tag=tag, step=step)
 
+    def reinit(self, iterable, epoch=None, prefix=None):
+        self.wrapped_bar.reinit(iterable, epoch, prefix)
+
+    def save_args(self, tag=''):
+        """Save args to yaml file"""
+        writer = self._writer(tag)
+        if writer is None:
+            raise FileNotFoundError('Cannot save args to yaml. Writer not initialized.')
+        # v = 0
+        yaml_file = os.path.join(writer.logdir, 'args.yaml')
+        # while os.path.exists(yaml_file):
+        #     v += 1
+        #     yaml_file = os.path.join(writer.logdir, f'args_v{v}.yaml')
+        with open(yaml_file, 'w') as f:
+            yaml.safe_dump(self.args.__dict__, f)
+
     def __exit__(self, *exc):
         for writer in getattr(self, '_writers', {}).values():
             writer.close()
@@ -277,8 +328,14 @@ class tensorboard_log_wrapper(progress_bar):
             return
         if step is None:
             step = stats['num_updates']
+        metrics_dict = {}
         for key in stats.keys() - {'num_updates'}:
             if isinstance(stats[key], AverageMeter):
                 writer.add_scalar(key, stats[key].val, step)
+                metrics_dict[key] = stats[key].val.item() if isinstance(stats[key].val, Tensor) else stats[key].val
             elif isinstance(stats[key], Number):
                 writer.add_scalar(key, stats[key], step)
+                metrics_dict[key] = stats[key].item() if isinstance(stats[key], Tensor) else stats[key]
+        hparams_dict = {k: self.args.__dict__[k] for k in self.HPARAM_ARGS if hasattr(self.args, k)}
+        if len(hparams_dict):
+            writer.add_hparams(hparam_dict=hparams_dict, metric_dict=metrics_dict)
