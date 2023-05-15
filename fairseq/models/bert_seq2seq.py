@@ -236,6 +236,8 @@ class Transformer_nonautoregressive_continuous(Transformer_nonautoregressive):
         parser.add_argument('--masking-strategy', type=str,
                             choices=['mask_token', 'uniform', 'interpolate_to_uniform'],
                             help='masking strategy')
+        parser.add_argument('--smooth-targets', action='store_true',
+                            help='flag to smooth target embeddings during training')
 
     @classmethod
     def build_model(cls, args, task):
@@ -463,14 +465,15 @@ class SelfTransformerDecoderContinuous(SelfTransformerDecoder):
         super().__init__(args, dictionary, embed_tokens, embed_scale, no_encoder_attn, left_pad, final_norm)
         self.masking_idx = dictionary.mask_index
         self.masking_strategy = args.masking_strategy
+        self.smooth_targets = args.smooth_targets if hasattr(args, 'smooth_targets') else False  # backwards compat
 
-    def forward(self, prev_output_tokens, prev_output_embeds=None, encoder_out=None, **kwargs):
+    def forward(self, prev_output_tokens, prev_output_probs=None, encoder_out=None, **kwargs):
         """
         Args:
             prev_output_tokens (LongTensor): previous decoder outputs of shape
                 `(batch, tgt_len)`, for input feeding/teacher forcing
-            prev_output_embeds (FloatTensor): previous decoder logits of shape
-                `(batch, tgt_len, vocab)`, for input feeding/teacher forcing
+            prev_output_probs (FloatTensor): previous decoder softmax outputs of shape
+                `(batch, tgt_len, vocab)`, for iterative refinement at inference time
             encoder_out (Tensor, optional): output from the encoder, used for
                 encoder-side attention
         Returns:
@@ -488,33 +491,36 @@ class SelfTransformerDecoderContinuous(SelfTransformerDecoder):
             prev_output_tokens,
         ) if self.embed_positions is not None else None
 
-        # embed tokens and positions
-        if prev_output_embeds is None:
+        # embed tokens (if prev_output_probs not provided)
+        if prev_output_probs is None:
             x = self.embed_tokens(prev_output_tokens)
-            if self.masking_strategy == "mask_token":
+            if self.masking_strategy == 'mask_token':
                 x = x
-            elif self.masking_strategy == "uniform" or self.masking_strategy == "interpolate_to_uniform":
-                bsz, seq_len = x.shape[:2]
+            elif self.masking_strategy == 'uniform' or self.masking_strategy == 'interpolate_to_uniform':
                 vocab_sz = self.embed_tokens.weight.shape[0]
-                unif = (1 / vocab_sz) * torch.ones((bsz, seq_len, vocab_sz))
                 with torch.no_grad():
-                    unif_embed = torch.matmul(unif.to(x.device), self.embed_tokens.weight)
-                if self.masking_strategy == "uniform":
-                    x[decoder_masking_mask] = unif_embed[decoder_masking_mask]
-                else:
-                    with torch.no_grad():
-                        target = kwargs["target"]
+                    unif = (1 / vocab_sz) * torch.ones(vocab_sz, dtype=x.dtype, device=x.device)
+                    unif_embed = torch.matmul(unif, self.embed_tokens.weight)
+                    decoder_padding_masking_mask = decoder_padding_mask * decoder_masking_mask
+                    if 'target_clone' in kwargs.keys():
+                        target = kwargs['target_clone']
                         target[~decoder_masking_mask] = prev_output_tokens[~decoder_masking_mask]
                         target_embed = self.embed_tokens(target)
-                    t = (decoder_masking_mask.sum(dim=-1) / decoder_masking_mask.shape[-1]).unsqueeze(1).unsqueeze(2)
-                    intp_to_unif_embed = target_embed * t + unif_embed * (1 - t)
+                        t = (decoder_masking_mask.sum(dim=-1, dtype=x.dtype) / decoder_masking_mask.shape[-1]).unsqueeze(1).unsqueeze(2)
+                        if self.smooth_targets:
+                            smoothed_target_embed = target_embed * (1 - t) + unif_embed * t
+                            x[~decoder_padding_masking_mask] = smoothed_target_embed[~decoder_padding_masking_mask]
+                if self.masking_strategy == 'uniform':
+                    x[decoder_masking_mask] = unif_embed
+                else:  # interpolate_to_uniform
+                    intp_to_unif_embed = target_embed * (1 - t) + unif_embed * t
                     x[decoder_masking_mask] = intp_to_unif_embed[decoder_masking_mask]
             else:
                 raise NotImplementedError(f"Masking strategy {self.masking_strategy} not implemented.")
             if self.project_in_dim is not None:
                 x = self.project_in_dim(x)
         else:
-            x = torch.matmul(prev_output_embeds, self.embed_tokens.weight)
+            x = torch.matmul(prev_output_probs, self.embed_tokens.weight)
 
         if positions is not None:
             x += positions
@@ -889,3 +895,4 @@ def bi_transformer_lm_big(args):
 @register_model_architecture('bert_transformer_seq2seq_continuous', 'bert_transformer_seq2seq_continuous')
 def bert_continuous(args):
     args.masking_strategy = getattr(args, 'masking_strategy', 'uniform')
+    args.smooth_targets = getattr(args, 'smooth_targets', False)
