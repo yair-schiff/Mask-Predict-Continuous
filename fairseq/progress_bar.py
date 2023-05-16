@@ -262,7 +262,7 @@ class CustomSummaryWriter(SummaryWriter):
 
 class tensorboard_log_wrapper(progress_bar):
     """Log to tensorboard."""
-    HPARAM_ARGS = ['masking_strategy', 'smooth_targets', 'warmup_updates']
+    HPARAM_ARGS = ['masking_strategy', 'smooth_targets', 'lr', 'warmup_updates', 'all_target_loss']
 
     def __init__(self, wrapped_bar, tensorboard_logdir, args):
         self.wrapped_bar = wrapped_bar
@@ -336,6 +336,10 @@ class tensorboard_log_wrapper(progress_bar):
             elif isinstance(stats[key], Number):
                 writer.add_scalar(key, stats[key], step)
                 metrics_dict[key] = stats[key].item() if isinstance(stats[key], Tensor) else stats[key]
-        hparams_dict = {k: self.args.__dict__[k] for k in self.HPARAM_ARGS if hasattr(self.args, k)}
+        hparams_dict = {}
+        for k in self.HPARAM_ARGS:
+            if hasattr(self.args, k):
+                v = self.args.__dict__[k]
+                hparams_dict[k] = v[0] if isinstance(v, list) else v
         if len(hparams_dict):
             writer.add_hparams(hparam_dict=hparams_dict, metric_dict=metrics_dict)
