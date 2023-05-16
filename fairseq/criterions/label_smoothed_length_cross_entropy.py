@@ -18,12 +18,15 @@ class LabelSmoothedLengthCrossEntropyCriterion(FairseqCriterion):
     def __init__(self, args, task):
         super().__init__(args, task)
         self.eps = args.label_smoothing
+        self.masking_idx = task.target_dictionary.mask()
 
     @staticmethod
     def add_args(parser):
         """Add criterion-specific arguments to the parser."""
         parser.add_argument('--label-smoothing', default=0., type=float, metavar='D',
                             help='epsilon for label smoothing, 0 means no label smoothing')
+        parser.add_argument('--all-target-loss', action='store_true',
+                            help='calculate ce loss at each target position (not just masked ones)')
 
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
@@ -49,6 +52,9 @@ class LabelSmoothedLengthCrossEntropyCriterion(FairseqCriterion):
         lprobs = model.get_normalized_probs(net_output, log_probs=True)
         lprobs = lprobs.view(-1, lprobs.size(-1))
         target = model.get_targets(sample, net_output).view(-1, 1)
+        if self.args.all_target_loss:  # Calculate loss at every position --> fill in masked target locations
+            mask_mask = sample['net_input']['prev_output_tokens'].view(-1, 1).eq(self.masking_idx)
+            target[~mask_mask] = sample['net_input']['prev_output_tokens'].view(-1, 1)[~mask_mask]
         non_pad_mask = target.ne(self.padding_idx)
         length_lprobs = net_output[1]['predicted_lengths']
         length_target = sample['net_input']['prev_output_tokens'].ne(self.padding_idx).sum(-1).unsqueeze(-1) #TODO doesn't work for dynamic length. change to eos-based method.
