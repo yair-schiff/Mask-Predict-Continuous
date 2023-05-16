@@ -21,11 +21,13 @@ function usage {
     echo ""
     echo "Run Generation."
     echo ""
-    echo "usage: ${programname} --expid <string> --decoding_strategy <string> --decoding_iterations [int] --checkpoint_file [string] --interactive"
+    echo "usage: ${programname} --dataset <string> --expid <string> --decoding_strategy <string> --refine_all --decoding_iterations [int] --checkpoint_file [string] --interactive"
     echo ""
     echo "  --interactive store_true    Run generation script in interactive session."
+    echo "  --dataset string            Dataset."
     echo "  --expid string              Experiment."
     echo "  --decoding_strategy string  Decoding strategy."
+    echo "  --refine_all                Refine all tokens at every iteration."
     echo "  --decoding_iterations int   Decoding iterations (optional: default=10)."
     echo "  --checkpoint_file string    Checkpoint file (optional: default='checkpoint_best.pt')."
     echo ""
@@ -40,6 +42,13 @@ function die {
 if [[ -n "${help}" ]]; then
   usage
   exit 0
+fi
+if [[ -z "${dataset}" ]]; then
+  die "Missing required argument: dataset."
+fi
+data_bin="data-bin/${dataset}"
+if [[ ! -d "${data_bin}" ]]; then
+  die "Data path ${data_bin} does not exist."
 fi
 if [[ -z "${expid}" ]]; then
   die "Missing required argument: expid."
@@ -57,19 +66,21 @@ if [[ -z "${checkpoint_file}" ]]; then
 fi
 
 # Save directory
-path="saved_models/${expid}/${checkpoint_file}"
+path="saved_models/${dataset}/${expid}/${checkpoint_file}"
 
 # Run script (interactive or sbatch)
 if [[ -n "${interactive}" ]]; then
+  export data_bin
   export path
   export decoding_strategy
   export decoding_iterations
+  export refine_all
   bash generate.sh
 else
   # Command line exports
-  export_str="ALL,path=${path},decoding_strategy=${decoding_strategy},decoding_iterations=${decoding_iterations}"
+  export_str="ALL,data_bin=${data_bin},path=${path},decoding_strategy=${decoding_strategy},decoding_iterations=${decoding_iterations},refine_all=${refine_all}"
   # Build job name and make log dir
-  job_name="gen_CMLM_${expid}"
+  job_name="gen_CMLM_${dataset}_${expid}"
   base_log_dir="watch_folder"
   log_dir="${base_log_dir}/${expid}"
   mkdir -p "${log_dir}"

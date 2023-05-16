@@ -19,12 +19,17 @@ elif [[ "${CONDA_PREFIX}" != *"/cmlm" ]]; then
   conda activate cmlm
 fi
 
+if [[ -n "${refine_all}" ]]; then
+  refine_all="--refine-all"
+fi
+
 # Run script
 python generate_cmlm.py \
-  ./data-bin/wmt16.en-ro \
+  ${data_bin} \
   --path "${path}" \
   --decoding-strategy "${decoding_strategy}" \
   --task translation_self \
   --remove-bpe \
   --max-sentences 20 \
-  --decoding-iterations ${decoding_iterations}
+  --decoding-iterations ${decoding_iterations} \
+  ${refine_all}

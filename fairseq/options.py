@@ -97,7 +97,6 @@ def parse_args_and_arch(parser, input_args=None, parse_known=False, suppress_def
     # parse a second time after adding the *-specific arguments.
     # If input_args is given, we will parse those args instead of sys.argv.
     args, _ = parser.parse_known_args(input_args)
-
     # Add model-specific args to parser.
     if hasattr(args, 'arch'):
         model_specific_group = parser.add_argument_group(
@@ -123,6 +122,10 @@ def parse_args_and_arch(parser, input_args=None, parse_known=False, suppress_def
         # hack to support extra args for block distributed data parallelism
         from fairseq.optim.bmuf import FairseqBMUF
         FairseqBMUF.add_args(parser)
+    if hasattr(args, 'decoding_strategy'):
+        from fairseq.strategies import STRATEGY_REGISTRY
+        if hasattr(STRATEGY_REGISTRY[args.decoding_strategy], 'add_args'):
+            STRATEGY_REGISTRY[args.decoding_strategy].add_args(parser)
 
     # Parse a second time.
     if parse_known:
