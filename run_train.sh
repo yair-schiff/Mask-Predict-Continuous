@@ -21,14 +21,17 @@ function usage {
     echo ""
     echo "Run Training."
     echo ""
-    echo -e "usage:\n${programname} \\ \n\t--expid [string] \\ \n\t--masking_strategy [string] \\ \n\t--smooth_targets \\ \n\t--warmup_updates [int] \\ \n\t--num_devices [int] \\ \n\t--distill"
+    echo -e "usage:\n${programname} \\ \n\t--dataset <string> \n\t--expid [string] \\ \n\t--masking_strategy [string] \\ \n\t--smooth_targets \\ \n\t--all_target_loss \\ \n\t--lr [float] \\ \n\t--warmup_updates [int] \\ \n\t--num_devices [int] \\ \n\t--distill"
     echo ""
-    echo "  --distill store_true         Use distilled dataset."
-    echo "  --expid string               Unique name to give experiment (optional: default=automatically increase version id)."
-    echo "  --masking_strategy string    Masking strategy(optional: default='uniform')."
-    echo "  --smooth_targets store_true  Smooth non-masked target labels during training."
-    echo "  --num_devices int            Number of GPUs (optional: default=1)."
-    echo "  --warmup_updates int         Number of warmup steps for LR scheduler (optional: default=10000)."
+    echo "  --dataset string              Dataset."
+    echo "  --distill store_true          Use distilled dataset."
+    echo "  --expid string                Unique name to give experiment (optional: default=automatically increase version id)."
+    echo "  --masking_strategy string     Masking strategy(optional: default='uniform')."
+    echo "  --smooth_targets store_true   Smooth non-masked target labels during training."
+    echo "  --all_target_loss store_true  Calculate CE loss at each target position (not just masked ones)."
+    echo "  --num_devices int             Number of GPUs (optional: default=1)."
+    echo "  --lr float                    Learning rate (optional: default=5e-4)."
+    echo "  --warmup_updates int          Number of warmup steps for LR scheduler (optional: default=10000)."
     echo ""
 }
 
@@ -43,6 +46,9 @@ if [[ -n "${help}" ]]; then
 fi
 
 # Arg handling
+if [[ -z "${dataset}" ]]; then
+  die "Missing required argument: dataset."
+fi
 if [[ -z "${masking_strategy}" ]]; then
   masking_strategy="uniform"
 elif ! [[ "${masking_strategy}" =~ ^("baseline"|"mask_token"|"interpolate_to_uniform"|"uniform") ]]; then
@@ -51,20 +57,23 @@ fi
 if [[ -z "${num_devices}" ]]; then
   num_devices=1
 fi
+if [[ -z "${lr}" ]]; then
+  lr=5e-4
+fi
 if [[ -z "${warmup_updates}" ]]; then
   warmup_updates=10000
 fi
-if [[ -n "${distill}" ]]; then
-  data_bin="data-bin-distill"
-  base_save_dir="saved_models/distill"
-  base_log_dir="watch_folder/distill"
-else
-  data_bin="data-bin"
-  base_save_dir="saved_models"
-  base_log_dir="watch_folder"
+data_bin="data-bin/${dataset}"
+if [[ ! -d "${data_bin}" ]]; then
+  die "Data path ${data_bin} does not exist."
 fi
-
-
+base_save_dir="saved_models/${dataset}"
+base_log_dir="watch_folder/${dataset}"
+if [[ -n "${distill}" ]]; then
+  data_bin="${data_bin}_distill"
+  base_save_dir="${base_save_dir}/distill"
+  base_log_dir="${base_log_dir}/distill"
+fi
 
 # Setup save directory
 if [[ -z "${expid}" ]]; then
@@ -87,13 +96,13 @@ mkdir -p "${save_dir}"
 
 
 # Command line exports
-export_str="ALL,data_bin=${data_bin},num_devices=${num_devices},save_dir=${save_dir},masking_strategy=${masking_strategy},smooth_targets=${smooth_targets},warmup_updates=${warmup_updates}"
+export_str="ALL,data_bin=${data_bin},num_devices=${num_devices},save_dir=${save_dir},masking_strategy=${masking_strategy},smooth_targets=${smooth_targets},all_target_loss=${all_target_loss},lr=${lr},warmup_updates=${warmup_updates}"
 
 # Build job name and make log dir
 if [[ -n "${distill}" ]]; then
-  job_name="train_CMLM_distill_${expid}"
+  job_name="train_CMLM_${dataset}_distill_${expid}"
 else
-  job_name="train_CMLM_${expid}"
+  job_name="train_CMLM_${dataset}_${expid}"
 fi
 log_dir="${base_log_dir}/${expid}"
 mkdir -p "${log_dir}"

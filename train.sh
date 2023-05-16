@@ -21,15 +21,17 @@ elif [[ "${CONDA_PREFIX}" != *"/cmlm" ]]; then
   conda activate cmlm
 fi
 
-# Enable baseline runs:
+# Arch, masking, and other training flags:
 # shellcheck disable=SC2154
 if [[ "${masking_strategy}" == "baseline" ]]; then
-  arch_and_mask="--arch bert_transformer_seq2seq"
+  arch_mask_and_misc="--arch bert_transformer_seq2seq"
 else
-  if [[ -z "${smooth_targets}" ]]; then
-    arch_and_mask="--arch bert_transformer_seq2seq_continuous --masking-strategy ${masking_strategy}"
-  else
-    arch_and_mask="--arch bert_transformer_seq2seq_continuous --masking-strategy ${masking_strategy} --smooth-targets"
+  arch_mask_and_misc="--arch bert_transformer_seq2seq_continuous --masking-strategy ${masking_strategy}"
+  if [[ -n "${smooth_targets}" ]]; then
+    arch_mask_and_misc="${arch_mask_and_misc} --smooth-targets"
+  fi
+  if [[ -n "${all_target_loss}" ]]; then
+    arch_mask_and_misc="${arch_mask_and_misc} --all-target-loss"
   fi
 fi
 
@@ -44,17 +46,17 @@ MAIN_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 export MAIN_ADDR
 
 # Run script
-srun python train.py \
-  "./${data_bin}/wmt16.en-ro" \
+timeout 47h srun python train.py \
+  "${data_bin}" \
   --num-workers 8 \
   --log-interval 10 \
   --tensorboard-logdir "${save_dir}" \
-  ${arch_and_mask} \
+  ${arch_mask_and_misc} \
   --share-all-embeddings \
   --criterion label_smoothed_length_cross_entropy \
   --label-smoothing 0.1 \
   --fp16 \
-  --lr 5e-4 \
+  --lr ${lr} \
   --warmup-init-lr 1e-7 \
   --min-lr 1e-9 \
   --lr-scheduler inverse_sqrt \
@@ -77,3 +79,7 @@ srun python train.py \
   --distributed-no-spawn \
   --ddp-backend no_c10d \
   --update-freq ${update_freq}
+
+if [[ $? == 124 ]]; then
+  scontrol requeue "${SLURM_JOB_ID}"
+fi
