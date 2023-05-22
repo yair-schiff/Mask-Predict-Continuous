@@ -57,8 +57,9 @@ class PyBleuScorer(object):
         prec = 0
         for i, w in enumerate(self.weights, start=1):
             p = num_prec[i] / denom_prec[i] if denom_prec[i] != 0 else 0
-            p = math.log(p) if p > 0 else 0
-            prec += p * w 
+            print('BLEU p', i, p)
+            p = math.log(p) if p > 0 else -math.inf
+            prec += p * w
         
         bp = min(1, math.exp(1 - ref_len/out_len)) if out_len != 0 else 0
         
