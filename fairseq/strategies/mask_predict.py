@@ -11,13 +11,52 @@ from . import DecodingStrategy, register_strategy
 from .strategy_utils import generate_step_with_prob, assign_single_value_long, assign_single_value_byte, assign_multi_value_long, convert_tokens
 
 
+from functools import partial
+from .strategy_utils import classifier_guidance
+from fairseq.data import Dictionary
+from fairseq.models.classifier import Classifier
+
+
 @register_strategy('mask_predict')
 class MaskPredict(DecodingStrategy):
     
     def __init__(self, args):
         super().__init__()
         self.iterations = args.decoding_iterations
-    
+        self.ctrl_fn = self.init_ctrl_fn(args)
+
+    @staticmethod
+    def add_args(parser):
+        parser.add_argument('--ctrl-model', type=str,
+                            help='path to trained control model')
+        parser.add_argument('--tgt-class', type=int,
+                            help='control constraint: target class to maximize')
+        parser.add_argument('--ctrl-steps', type=int,
+                            help='number of classifier guided drift steps')
+        parser.add_argument('--ctrl-lr', type=float,
+                            help='magnitude of classifier guided drift steps')
+
+    @staticmethod
+    def init_ctrl_fn(args):
+        if args.ctrl_model is not None:
+            ctrl_ckpt = torch.load(args.ctrl_model, map_location='cpu')
+            ctrl_dict = Dictionary.load(ctrl_ckpt['args'].dict_file)
+            ctrl_model = Classifier(ctrl_ckpt['args'], ctrl_dict)
+            ctrl_model.load_state_dict(ctrl_ckpt['model'])
+            ctrl_model.eval()
+            if torch.cuda.is_available():
+                ctrl_model.cuda()
+
+            ctrl_args = {
+                'ctrl_model': ctrl_model,
+                'tgt_class': args.tgt_class,
+                'ctrl_steps': args.ctrl_steps,
+                'ctrl_lr': args.ctrl_lr
+            }
+            return partial(classifier_guidance, **ctrl_args)
+        return None
+
+
     def generate(self, model, encoder_out, tgt_tokens, tgt_dict):
         bsz, seq_len = tgt_tokens.size()
         pad_mask = tgt_tokens.eq(tgt_dict.pad())
@@ -41,6 +80,9 @@ class MaskPredict(DecodingStrategy):
             #print("Step: ", counter+1)
             #print("Masking: ", convert_tokens(tgt_dict, tgt_tokens[0]))
             decoder_out = model.decoder(tgt_tokens, encoder_out)
+            if self.ctrl_fn is not None:
+                new_decoder_out = self.ctrl_fn(decoder_out[0], pad_mask)
+                decoder_out = (new_decoder_out, decoder_out[1])
             new_tgt_tokens, new_token_probs, all_token_probs = generate_step_with_prob(decoder_out)
             
             assign_multi_value_long(token_probs, mask_ind, new_token_probs)

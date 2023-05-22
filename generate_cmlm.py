@@ -7,15 +7,18 @@
 """
 Translate pre-processed data with a trained model.
 """
-
+import ipdb
 import torch
 import numpy as np
 import math
 import torch.nn.functional as F
 import re
 
+from transformers import pipeline
+
 from fairseq import pybleu, options, progress_bar, tasks, tokenizer, utils, strategies
 from fairseq.meters import TimeMeter
+from fairseq.models.transformer import TransformerModel
 from fairseq.strategies.strategy_utils import duplicate_encoder_out
 
 
@@ -80,14 +83,26 @@ def main(args):
     ).next_epoch_itr(shuffle=False)
     
     results = []
+    results_ppl = []
     scorer = pybleu.PyBleuScorer()
     num_sentences = 0
     has_target = True
     timer = TimeMeter()
 
-    with progress_bar.build_progress_bar(args, itr) as t:
+    # AR model for PPL
+    ar_ckpt = torch.load(args.ar_model, map_location='cpu')
+    ar_model = TransformerModel.build_model(ar_ckpt['args'], task)
+    ar_model.load_state_dict(ar_ckpt['model'])
+    ar_model.eval()
+    if torch.cuda.is_available():
+        ar_model.cuda()
 
-        translations = generate_batched_itr(t, strategy, models, tgt_dict, length_beam_size=args.length_beam, use_gold_target_len=args.gold_target_len)
+    class_model = pipeline(model=args.classifier_config, device='cuda:0' if torch.cuda.is_available() else 'cpu')
+    neg_class, neu_class, pos_class = 0, 0, 0
+    with progress_bar.build_progress_bar(args, itr) as t:
+        translations = generate_batched_itr(t, strategy, models, tgt_dict, length_beam_size=args.length_beam,
+                                            use_gold_target_len=args.gold_target_len)
+
         for sample_id, src_tokens, target_tokens, hypos in translations:
             has_target = target_tokens is not None
             target_tokens = target_tokens.int().cpu() if has_target else None
@@ -109,10 +124,28 @@ def main(args):
                 print('S-{}\t{}'.format(sample_id, src_str))
                 if has_target:
                     print('T-{}\t{}'.format(sample_id, target_str))
+                    # hypo_tokens_ar = hypos.clone()
                     hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
                         hypo_tokens=hypos.int().cpu(),
                         src_str=src_str,
-                        alignment= None,
+                        alignment=None,
+                        align_dict=align_dict,
+                        tgt_dict=dict,
+                        remove_bpe=None, #args.remove_bpe,
+                    )
+                    # ipdb.set_trace()
+                    ar_logits = ar_model(
+                        src_tokens=src_tokens.unsqueeze(0),
+                        prev_output_tokens=hypo_tokens.to(hypos.device).unsqueeze(0),
+                        src_lengths=torch.LongTensor([src_tokens.shape[-1]]).unsqueeze(0).to(src_tokens.device)
+                    )[0]
+                    ppl = torch.exp(F.cross_entropy(ar_logits.squeeze(), hypo_tokens.long().to(hypos.device))).item()
+                    results_ppl.append(ppl)
+
+                    hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
+                        hypo_tokens=hypos.int().cpu(),
+                        src_str=src_str,
+                        alignment=None,
                         align_dict=align_dict,
                         tgt_dict=dict,
                         remove_bpe=args.remove_bpe,
@@ -127,7 +160,7 @@ def main(args):
                                 sample_id,
                                 ' '.join(map(lambda x: str(utils.item(x)), alignment))
                             ))
-                        print()
+                        # print()
                         
                         # Score only the top hypothesis
                         if has_target:
@@ -136,6 +169,22 @@ def main(args):
                                 target_tokens = tgt_dict.encode_line(target_str, add_if_not_exist=True)
 
                             results.append((target_str, hypo_str))
+                            sentiment = class_model(hypo_str[:350])
+
+                            if sentiment[0]['label'] == 'LABEL_0':
+                                neg_class += 1
+                            elif sentiment[0]['label'] == 'LABEL_1':
+                                neu_class += 1
+                            elif sentiment[0]['label'] == 'LABEL_2':  # 'POS':
+                                pos_class += 1
+                            else:
+                                raise ValueError(f'Class not recognized: {sentiment[0]}')
+                            print('C-{}\t{},{}'.format(
+                                sample_id,
+                                sentiment[0]['label'],
+                                sentiment[0]['score']
+                            ))
+                            print()
 
                     num_sentences += 1
 
@@ -143,6 +192,10 @@ def main(args):
             print('Time = {}'.format(timer.elapsed_time))
             ref, out = zip(*results)
             print('| Generate {} with beam={}: BLEU4 = {:2.2f}, '.format(args.gen_subset, args.beam, scorer.score(ref, out)))
+            print('| Generate {} with beam={}: AR PPL = {:2.2f}, '.format(args.gen_subset, args.beam, torch.tensor(results_ppl).mean().item()))
+            print('| Generate {} with beam={}: NEG = {:2.2f}, '.format(args.gen_subset, args.beam, neg_class / len(results)))
+            print('| Generate {} with beam={}: NEU = {:2.2f}, '.format(args.gen_subset, args.beam, neu_class / len(results)))
+            print('| Generate {} with beam={}: POS = {:2.2f}, '.format(args.gen_subset, args.beam, pos_class / len(results)))
 
 
 def dehyphenate(sent):
@@ -200,14 +253,14 @@ def generate(strategy, encoder_input, models, tgt_dict, length_beam_size, gold_t
     
     duplicate_encoder_out(encoder_out, bsz, length_beam_size)
     hypotheses, lprobs = strategy.generate(model, encoder_out, tgt_tokens, tgt_dict)
-    
+
     hypotheses = hypotheses.view(bsz, length_beam_size, max_len)
     lprobs = lprobs.view(bsz, length_beam_size)
     tgt_lengths = (1 - length_mask).sum(-1)
     avg_log_prob = lprobs / tgt_lengths.float()
     best_lengths = avg_log_prob.max(-1)[1]
     hypotheses = torch.stack([hypotheses[b, l, :] for b, l in enumerate(best_lengths)], dim=0)
-    
+
     return hypotheses
 
 
@@ -224,5 +277,9 @@ def predict_length_beam(gold_target_len, predicted_lengths, length_beam_size):
 
 if __name__ == '__main__':
     parser = options.get_generation_parser()
+    parser.add_argument('--ar-model', type=str,
+                        help='path to AR model')
+    parser.add_argument('--classifier-config', type=str,
+                        help='HF config file for classifier')
     args = options.parse_args_and_arch(parser)
     main(args)

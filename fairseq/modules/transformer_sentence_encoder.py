@@ -173,14 +173,16 @@ class TransformerSentenceEncoder(nn.Module):
         segment_labels: torch.Tensor = None,
         last_state_only: bool = False,
         positions: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        pad_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         # compute padding mask. This is needed for multi-head attention
-        padding_mask = tokens.eq(self.padding_idx)
+        padding_mask = pad_mask if pad_mask is not None else tokens.eq(self.padding_idx)
         if not padding_mask.any():
             padding_mask = None
 
-        x = self.embed_tokens(tokens)
+        x = inputs_embeds if inputs_embeds is not None else self.embed_tokens(tokens)
 
         if self.embed_scale is not None:
             x *= self.embed_scale

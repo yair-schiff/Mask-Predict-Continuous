@@ -21,13 +21,14 @@ function usage {
     echo ""
     echo "Run Generation."
     echo ""
-    echo "usage: ${programname} --dataset <string> --expid <string> --decoding_strategy <string> --refine_all --decoding_iterations [int] --checkpoint_file [string] --interactive"
+    echo "usage: ${programname} --dataset <string> --expid <string> --decoding_strategy <string> --refine_all --control --decoding_iterations [int] --checkpoint_file [string] --interactive"
     echo ""
     echo "  --interactive store_true    Run generation script in interactive session."
     echo "  --dataset string            Dataset."
     echo "  --expid string              Experiment."
     echo "  --decoding_strategy string  Decoding strategy."
     echo "  --refine_all                Refine all tokens at every iteration."
+    echo "  --control                   Run control generation."
     echo "  --decoding_iterations int   Decoding iterations (optional: default=10)."
     echo "  --checkpoint_file string    Checkpoint file (optional: default='checkpoint_best.pt')."
     echo ""
@@ -75,10 +76,11 @@ if [[ -n "${interactive}" ]]; then
   export decoding_strategy
   export decoding_iterations
   export refine_all
+  export control
   bash generate.sh
 else
   # Command line exports
-  export_str="ALL,data_bin=${data_bin},path=${path},decoding_strategy=${decoding_strategy},decoding_iterations=${decoding_iterations},refine_all=${refine_all}"
+  export_str="ALL,data_bin=${data_bin},path=${path},decoding_strategy=${decoding_strategy},decoding_iterations=${decoding_iterations},refine_all=${refine_all},control=${control}"
   # Build job name and make log dir
   job_name="gen_CMLM_${dataset}_${expid}"
   base_log_dir="watch_folder"

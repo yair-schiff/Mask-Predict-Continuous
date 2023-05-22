@@ -23,6 +23,12 @@ if [[ -n "${refine_all}" ]]; then
   refine_all="--refine-all"
 fi
 
+if [[ -n "${control}" ]]; then
+  ctrl_args="--ctrl-model saved_models/wmt16.ro-en/classifier/sentiment/v5/checkpoint_best.pt --tgt-class 2 --ctrl-steps 10 --ctrl-lr 100.0"
+fi
+
+#'finiteautomata/bertweet-base-sentiment-analysis' \
+
 # Run script
 python generate_cmlm.py \
   ${data_bin} \
@@ -32,4 +38,7 @@ python generate_cmlm.py \
   --remove-bpe \
   --max-sentences 20 \
   --decoding-iterations ${decoding_iterations} \
-  ${refine_all}
+  --ar-model 'saved_models/wmt16.ro-en/AR/checkpoint_best.pt' \
+  --classifier-config 'cardiffnlp/twitter-roberta-base-sentiment' \
+  ${refine_all} ${ctrl_args} \
+
